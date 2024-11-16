@@ -3,18 +3,31 @@ import itertools
 import json
 import random
 import argparse
+import re
+from bs4 import BeautifulSoup
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from chromedriver_py import binary_path
 from urllib.parse import urlencode
 from time import sleep
 
+REMOVE_HTML_REGEX = re.compile('<.*?>|&([a-z0-9]+|#[0-9]{1,6}|#x[0-9a-f]{1,6});')
+
+def remove_html(html):
+  soup = BeautifulSoup(html, "html.parser")
+  return soup.get_text(separator=" ").strip()
+
+def remove_espacos(texto):
+    return re.sub('\s+', ' ', texto)
+
 URL = "https://www.qconcursos.com/questoes-de-concursos/questoes"
-DISCIPLINES = {"DIR_ADM": 2, "DIR_CON": 3, "DIR_CIV": 8, "DIR_PEN": 9, "DIR_TRI": 18}
+DISCIPLINES = {"POR_BRA": 1, "DIR_ADM": 2, "DIR_CON": 3, "DIR_CIV": 8, "DIR_PEN": 9, "DIR_TRI": 18}
 MODALITIES = {"ME": 1 , "CE": 2}
 ANOS = range(2000, 2025)
 ESCOLARIDADES = {"F": [1], "M": [2], "S": [3], "FM": [1, 2], "MS": [2, 3], "FS": [1, 3], "FMS": [1, 2, 3]}
@@ -52,7 +65,8 @@ def get_page(driver, base_url, discipline_id, modality_id, publication_year, dif
         def parse_question(question): 
             # Header:
             prefix = './/div[@class="q-question-header"]'
-            id = question.find_element(By.XPATH, f'{prefix}/div[@class="q-ref"]/div[@class="q-id"]').text
+            id = re.sub('[^0-9]', '', question.find_element(By.XPATH, f'{prefix}/div[@class="q-ref"]/div[@class="q-id"]').text)
+            print(id)
             breadcrumb = [b.text for b in question.find_elements(By.XPATH, f'{prefix}/div[@class="q-question-breadcrumb"]/a[@class="q-link"]')]
             breadcrumb_hidden = [b.get_attribute("innerText") for b in question.find_elements(By.XPATH, f'{prefix}/div[@class="q-question-breadcrumb"]/a[@class="q-link q-hidden-crumb"]')]
             subject = breadcrumb[0]
@@ -67,8 +81,17 @@ def get_page(driver, base_url, discipline_id, modality_id, publication_year, dif
             entity = entity.replace("Órgão: ", "")
             # Corpo:
             prefix = './/div[@class="q-question-body"]'
-            text = question.find_element(By.XPATH, f'{prefix}/div[@class="q-question-text"]').text
-            print(text)
+            # Corpo - Texto e enunciado:
+            texts = question.find_elements(By.XPATH, f'{prefix}/div[@class="q-question-text" or @class="q-question-text--print-hide"]')
+            text = None
+            text_img_url = None
+            if(texts):
+                text_html = texts[0].find_elements(By.XPATH, f'.//div[contains(@id, "question")]')[0]
+                text_imgs = text_html.find_elements(By.XPATH, f'.//img')
+                if(text_imgs):
+                    text_img_url = text_imgs[0].get_attribute('src')
+                text = remove_espacos(remove_html(text_html.get_attribute("innerHTML"))).strip()
+                text = text if text else None
             enunciation = question.find_element(By.XPATH, f'{prefix}/div[@class="q-question-enunciation"]').text
             nullified = bool(question.find_elements(By.XPATH, f'{prefix}//label[@class="q-question-label q-question-label--nullified"]'))
             outdated = bool(question.find_elements(By.XPATH, f'{prefix}//label[@class="q-question-label q-question-label--outdated"]'))
@@ -82,7 +105,20 @@ def get_page(driver, base_url, discipline_id, modality_id, publication_year, dif
                 return None
             if (not options_enums):
                 raise ParsingErrorException 
-            return {'id': id, 'subject': subject, 'themes': themes, 'year': year, 'examiner': examiner, 'entity': entity, 'enunciation': enunciation, 'nullified': nullified, 'outdated': outdated, 'options': options}
+            return {
+                'id': id, 
+                'subject': subject, 
+                'themes': themes, 
+                'year': year, 
+                'examiner': examiner, 
+                'entity': entity, 
+                'enunciation': enunciation, 
+                'nullified': nullified, 
+                'outdated': outdated, 
+                'options': options,
+                'text': text,
+                'text_img_url': text_img_url
+            }
 
         def parse_answer(answer): 
             return answer.find_element(By.XPATH, f'.//span[@class="q-answer"]').get_attribute("innerText")
@@ -104,9 +140,7 @@ def get_page(driver, base_url, discipline_id, modality_id, publication_year, dif
         print(f"Processing URL: {gen_url()}")
 
     driver.get(gen_url())
-    question_list = parse_page(driver)
-
-    return question_list;
+    return parse_page(driver);
 
 def get_pages(driver, base_url=URL, discipline_ids=[None], modality_ids=[None], publication_years=[None], difficulties=[None], scholarity_ids=[None], sleep_after=(1.0, 2.0), debug=False):
     complete_question_list = []
